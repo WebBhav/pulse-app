@@ -1,0 +1,6 @@
+{
+  "name": "Pulse Poke",
+  "description": "A real-time neon physical wave simulation app that lets colleagues, couples, and friends send vibrating pokes to each other instantly.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

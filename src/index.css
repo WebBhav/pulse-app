@@ -1,0 +1,147 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Helvetica Neue', Arial, sans-serif;
+  --font-display: "Space Grotesk", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+
+  --color-neon-pink: #ff00f5;
+  --color-neon-blue: #00f3ff;
+  --color-neon-lime: #bfff00;
+  --color-neon-orange: #f97316;
+}
+
+@keyframes wave-ripple {
+  0% {
+    transform: scale(0.95);
+    opacity: 0.9;
+  }
+  50% {
+    opacity: 0.4;
+  }
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+
+@keyframes wave-ripple-slow {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.6;
+  }
+  100% {
+    transform: scale(3.2);
+    opacity: 0;
+  }
+}
+
+@keyframes pulse-neon {
+  0%, 100% {
+    text-shadow: 0 0 8px rgba(0, 243, 255, 0.6), 0 0 16px rgba(0, 243, 255, 0.4);
+    box-shadow: 0 0 15px rgba(0, 243, 255, 0.4), inset 0 0 10px rgba(0, 243, 255, 0.2);
+  }
+  50% {
+    text-shadow: 0 0 16px rgba(0, 243, 255, 0.9), 0 0 32px rgba(0, 243, 255, 0.7);
+    box-shadow: 0 0 35px rgba(0, 243, 255, 0.8), inset 0 0 20px rgba(0, 243, 255, 0.5);
+  }
+}
+
+@keyframes float {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+@keyframes grid-move {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: 40px 40px;
+  }
+}
+
+.animate-wave {
+  animation: wave-ripple 2.4s cubic-bezier(0.1, 0.8, 0.3, 1) infinite;
+}
+
+.animate-wave-delay-1 {
+  animation: wave-ripple 2.4s cubic-bezier(0.1, 0.8, 0.3, 1) infinite;
+  animation-delay: 0.8s;
+}
+
+.animate-wave-delay-2 {
+  animation: wave-ripple 2.4s cubic-bezier(0.1, 0.8, 0.3, 1) infinite;
+  animation-delay: 1.6s;
+}
+
+.animate-wave-slow {
+  animation: wave-ripple-slow 4s cubic-bezier(0.1, 0.8, 0.3, 1) infinite;
+}
+
+.animate-pulse-neon {
+  animation: pulse-neon 2s infinite alternate;
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+/* Sophisticated Dark dot background */
+.dot-bg {
+  background-image: radial-gradient(rgba(255, 255, 255, 0.1) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* Glass effect from the theme */
+.glass {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Theme specified glowing shadows and borders */
+.glow-cyan {
+  box-shadow: 0 0 30px rgba(0, 243, 255, 0.35);
+  border: 1.5px solid rgba(0, 243, 255, 0.85);
+}
+
+.glow-pink {
+  box-shadow: 0 0 40px rgba(255, 0, 245, 0.45);
+  border: 1.5px solid rgba(255, 0, 245, 0.85);
+}
+
+.glow-lime {
+  box-shadow: 0 0 20px rgba(191, 255, 0, 0.25);
+  border: 1.5px solid rgba(191, 255, 0, 0.85);
+}
+
+.glow-orange {
+  box-shadow: 0 0 25px rgba(249, 115, 22, 0.25);
+  border: 1.5px solid rgba(249, 115, 22, 0.85);
+}
+
+.glow-glass {
+  box-shadow: 0 0 20px rgba(255, 255, 255, 0.05);
+}
+
+/* Text glow colors */
+.neon-glow-text-pink {
+  text-shadow: 0 0 10px rgba(255, 0, 245, 0.8);
+}
+.neon-glow-text-blue {
+  text-shadow: 0 0 10px rgba(0, 243, 255, 0.8);
+}
+.neon-glow-text-lime {
+  text-shadow: 0 0 10px rgba(191, 255, 0, 0.8);
+}
+.neon-glow-text-orange {
+  text-shadow: 0 0 10px rgba(249, 115, 22, 0.8);
+}
+
+
