@@ -1,0 +1,86 @@
+{
+  "entities": {
+    "user": {
+      "title": "User",
+      "description": "Representing user presence and signature details.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "color": {
+          "type": "string"
+        },
+        "isOnline": {
+          "type": "boolean"
+        },
+        "lastActive": {
+          "type": "number"
+        }
+      },
+      "required": ["id", "name", "color", "isOnline", "lastActive"]
+    },
+    "connection": {
+      "title": "Connection",
+      "description": "A communication channel between two signature stations.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "user1Id": {
+          "type": "string"
+        },
+        "user2Id": {
+          "type": "string"
+        },
+        "user1Name": {
+          "type": "string"
+        },
+        "user2Name": {
+          "type": "string"
+        },
+        "user1Color": {
+          "type": "string"
+        },
+        "user2Color": {
+          "type": "string"
+        },
+        "pokesCount": {
+          "type": "number"
+        },
+        "lastPokeTime": {
+          "type": "number"
+        },
+        "lastPokeFrom": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "user1Id",
+        "user2Id",
+        "user1Name",
+        "user2Name",
+        "user1Color",
+        "user2Color",
+        "pokesCount",
+        "lastPokeTime",
+        "lastPokeFrom"
+      ]
+    }
+  },
+  "firestore": {
+    "users/{userId}": {
+      "schema": "user",
+      "description": "User presence information."
+    },
+    "connections/{connectionId}": {
+      "schema": "connection",
+      "description": "Neural station sync connections and counts."
+    }
+  }
+}

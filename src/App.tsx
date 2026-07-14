@@ -17,6 +17,18 @@ import {
   ExternalLink,
   Compass,
 } from "lucide-react";
+import { db, handleFirestoreError, OperationType } from "./lib/firebase";
+import {
+  doc,
+  setDoc,
+  getDoc,
+  query,
+  where,
+  or,
+  onSnapshot,
+  collection,
+} from "firebase/firestore";
+
 
 interface User {
   id: string;
@@ -49,6 +61,23 @@ export default function App() {
   // 1. Core States
   const [user, setUser] = useState<User | null>(null);
   const [connections, setConnections] = useState<Connection[]>([]);
+
+  // Real-time presence dictionary of partners
+  const [partnersPresence, setPartnersPresence] = useState<
+    Record<string, { isOnline: boolean; lastActive: number }>
+  >({});
+
+  const enrichedConnections = useMemo(() => {
+    return connections.map((conn) => {
+      const partnerId = conn.user1Id === user?.id ? conn.user2Id : conn.user1Id;
+      const presence = partnersPresence[partnerId];
+      return {
+        ...conn,
+        partnerOnline: presence ? presence.isOnline : false,
+      };
+    });
+  }, [connections, partnersPresence, user]);
+
   const [onboarding, setOnboarding] = useState(true);
   const [loading, setLoading] = useState(true);
   
@@ -56,8 +85,8 @@ export default function App() {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [vibrateSupported, setVibrateSupported] = useState(false);
 
-  // SSE/Network connection status
-  const [sseConnected, setSseConnected] = useState(false);
+  // Network & Database connection status
+  const [syncConnected, setSyncConnected] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Invitation URL query params (if opened via an invite link)
@@ -86,7 +115,8 @@ export default function App() {
   const [ripplingConnectionId, setRipplingConnectionId] = useState<string | null>(null);
 
   // 2. Refs
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const connectionsRef = useRef<Connection[]>([]);
+
 
   // Check vibration support
   useEffect(() => {
@@ -94,6 +124,12 @@ export default function App() {
       setVibrateSupported(true);
     }
   }, []);
+
+  // Sync connectionsRef with state
+  useEffect(() => {
+    connectionsRef.current = connections;
+  }, [connections]);
+
 
   // Play audio waves
   const playPokeAudio = (freq = 440) => {
@@ -205,122 +241,198 @@ export default function App() {
     setLoading(false);
   }, []);
 
-  // 4. Real-time Synchronization (SSE connection setup)
+  // 4. Real-time Synchronization & Presence
   useEffect(() => {
     if (!user) return;
 
-    // Connect to backend stream
-    const url = `/api/stream?userId=${user.id}&name=${encodeURIComponent(
-      user.name
-    )}&color=${encodeURIComponent(user.color)}`;
+    // A. Subscriptions to Connections
+    const q = query(
+      collection(db, "connections"),
+      or(
+        where("user1Id", "==", user.id),
+        where("user2Id", "==", user.id)
+      )
+    );
 
-    const eventSource = new EventSource(url);
-    eventSourceRef.current = eventSource;
+    const unsubConnections = onSnapshot(
+      q,
+      (snapshot) => {
+        setSyncConnected(true);
+        setErrorMsg(null);
 
-    eventSource.onopen = () => {
-      setSseConnected(true);
-      setErrorMsg(null);
-    };
-
-    eventSource.onerror = (err) => {
-      console.error("SSE stream error, reconnecting...", err);
-      setSseConnected(false);
-      setErrorMsg("Reconnecting to neural presence grid...");
-    };
-
-    // Listen for live messages
-    eventSource.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-
-        if (data.type === "init") {
-          // Initialize active connections list
-          setConnections(data.connections);
-        } else if (data.type === "presence") {
-          // Update online status of connected partners
-          setConnections((prev) =>
-            prev.map((conn) => {
-              const partnerId = conn.user1Id === user.id ? conn.user2Id : conn.user1Id;
-              if (partnerId === data.userId) {
-                return { ...conn, partnerOnline: data.isOnline };
-              }
-              return conn;
-            })
-          );
-        } else if (data.type === "connection_created") {
-          // Inject newly mutual connection in state
-          setConnections((prev) => {
-            const exists = prev.some((c) => c.id === data.connection.id);
-            if (exists) return prev;
-            return [...prev, data.connection];
+        const connList: Connection[] = [];
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data();
+          connList.push({
+            id: data.id,
+            user1Id: data.user1Id,
+            user2Id: data.user2Id,
+            user1Name: data.user1Name,
+            user2Name: data.user2Name,
+            user1Color: data.user1Color,
+            user2Color: data.user2Color,
+            pokesCount: data.pokesCount,
+            lastPokeTime: data.lastPokeTime,
+            lastPokeFrom: data.lastPokeFrom,
           });
-        } else if (data.type === "poke") {
-          const conn = data.connection;
-          // Update poke count inside connection
-          setConnections((prev) =>
-            prev.map((c) => (c.id === conn.id ? { ...c, ...conn } : c))
-          );
+        });
 
-          // If current user is the target, show active incoming poke overlay
-          if (data.toUserId === user.id) {
-            const partnerName =
-              conn.user1Id === user.id ? conn.user2Name : conn.user1Name;
-            const partnerColor =
-              conn.user1Id === user.id ? conn.user2Color : conn.user1Color;
+        // Detect new incoming pokes
+        snapshot.docChanges().forEach((change) => {
+          if (change.type === "modified") {
+            const conn = change.doc.data();
+            if (conn.lastPokeFrom && conn.lastPokeFrom !== user.id) {
+              const prevConn = connectionsRef.current.find((c) => c.id === conn.id);
+              const prevCount = prevConn ? prevConn.pokesCount : 0;
+              if (conn.pokesCount > prevCount) {
+                const partnerName = conn.user1Id === user.id ? conn.user2Name : conn.user1Name;
+                const partnerColor = conn.user1Id === user.id ? conn.user2Color : conn.user1Color;
 
-            // Trigger immersive physical sound and haptics
-            playPokeAudio(380);
-            triggerVibrate([150, 100, 150, 100, 200]);
+                playPokeAudio(380);
+                triggerVibrate([150, 100, 150, 100, 200]);
 
-            // Set state to trigger received wave pop-up
-            setActivePoke({
-              id: Date.now().toString(),
-              fromUserId: data.fromUserId,
-              fromUserName: partnerName,
-              fromUserColor: partnerColor,
-              timestamp: Date.now(),
-            });
+                setActivePoke({
+                  id: Date.now().toString(),
+                  fromUserId: conn.lastPokeFrom,
+                  fromUserName: partnerName,
+                  fromUserColor: partnerColor,
+                  timestamp: Date.now(),
+                });
 
-            // Brief circle animation feedback
-            setRipplingConnectionId(conn.id);
-            setTimeout(() => setRipplingConnectionId(null), 2500);
+                setRipplingConnectionId(conn.id);
+                setTimeout(() => setRipplingConnectionId(null), 2500);
+              }
+            }
           }
-        }
+        });
+
+        setConnections(connList);
+      },
+      (error) => {
+        console.error("Firestore snapshot error", error);
+        setSyncConnected(false);
+        setErrorMsg("Failed to synchronize connections...");
+      }
+    );
+
+    // B. Presence Tracker
+    const userRef = doc(db, "users", user.id);
+    const setPresence = async (online: boolean) => {
+      try {
+        await setDoc(userRef, {
+          id: user.id,
+          name: user.name,
+          color: user.color,
+          isOnline: online,
+          lastActive: Date.now()
+        });
       } catch (err) {
-        console.error("Failed to process stream message", err);
+        console.error("Presence status set failed", err);
       }
     };
 
-    // Auto-accept active invite if available during connection initialization
+    setPresence(true);
+
+    const heartbeat = setInterval(() => {
+      setPresence(true);
+    }, 25000);
+
+    const handleFocus = () => setPresence(true);
+    const handleBlur = () => setPresence(false);
+    const handleBeforeUnload = () => setPresence(false);
+
+    window.addEventListener("focus", handleFocus);
+    window.addEventListener("blur", handleBlur);
+    window.addEventListener("beforeunload", handleBeforeUnload);
+
+    // C. Auto Invite Accept handler
     if (inviteInfo && inviteInfo.id !== user.id) {
-      fetch("/api/connections/join", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          myUserId: user.id,
-          otherUserId: inviteInfo.id,
-          otherUserName: inviteInfo.name,
-          otherUserColor: inviteInfo.color,
-        }),
-      })
-        .then((res) => res.json())
-        .then((data) => {
-          if (data.success) {
-            setInviteAccepted(true);
-            // Trigger a quick successful tone
-            playSendAudio();
+      const connId = [user.id, inviteInfo.id].sort().join("_");
+      const connRef = doc(db, "connections", connId);
+      
+      const setupInviteConnection = async () => {
+        try {
+          const connSnap = await getDoc(connRef);
+          if (!connSnap.exists()) {
+            await setDoc(connRef, {
+              id: connId,
+              user1Id: user.id,
+              user2Id: inviteInfo.id,
+              user1Name: user.name,
+              user2Name: inviteInfo.name,
+              user1Color: user.color,
+              user2Color: inviteInfo.color,
+              pokesCount: 0,
+              lastPokeTime: Date.now(),
+              lastPokeFrom: ""
+            });
           }
-        })
-        .catch((err) => console.error("Auto invite join failed", err));
+
+          // Register other user placeholder if needed
+          const otherRef = doc(db, "users", inviteInfo.id);
+          const otherSnap = await getDoc(otherRef);
+          if (!otherSnap.exists()) {
+            await setDoc(otherRef, {
+              id: inviteInfo.id,
+              name: inviteInfo.name,
+              color: inviteInfo.color,
+              isOnline: false,
+              lastActive: Date.now() - 3600 * 1000
+            });
+          }
+
+          setInviteAccepted(true);
+          playSendAudio();
+        } catch (err) {
+          console.error("Auto invite accept failed", err);
+        }
+      };
+
+      setupInviteConnection();
     }
 
     return () => {
-      eventSource.close();
+      unsubConnections();
+      clearInterval(heartbeat);
+      window.removeEventListener("focus", handleFocus);
+      window.removeEventListener("blur", handleBlur);
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      setPresence(false);
     };
   }, [user, inviteInfo]);
 
+  // D. Subscription to partner user presences
+  useEffect(() => {
+    if (!user || connections.length === 0) return;
+
+    const partnerIds: string[] = Array.from(
+      new Set(
+        connections.map((c) => (c.user1Id === user.id ? c.user2Id : c.user1Id))
+      )
+    );
+
+    const unsubs = partnerIds.map((partnerId: string) => {
+      return onSnapshot(doc(db, "users", partnerId), (snapshot) => {
+        if (snapshot.exists()) {
+          const data = snapshot.data();
+          setPartnersPresence((prev) => ({
+            ...prev,
+            [partnerId]: {
+              isOnline: data.isOnline ?? false,
+              lastActive: data.lastActive ?? 0,
+            },
+          }));
+        }
+      });
+    });
+
+    return () => {
+      unsubs.forEach((unsub) => unsub());
+    };
+  }, [user, connections]);
+
   // 5. Complete Profile Setup Onboarding
-  const handleOnboardingSubmit = (e: React.FormEvent) => {
+  const handleOnboardingSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!tempName.trim()) return;
 
@@ -331,25 +443,28 @@ export default function App() {
       color: selectedColor,
     };
 
-    // Store in LocalStorage and trigger state
-    localStorage.setItem("pulse_poke_user", JSON.stringify(newProfile));
-    setUser(newProfile);
-
-    // Register user profile details with the back-end API
-    fetch("/api/users/register", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(newProfile),
-    })
-      .then((res) => res.json())
-      .then(() => {
-        setOnboarding(false);
-        playSendAudio();
-      })
-      .catch((err) => {
-        console.error("Failed to register on backend", err);
-        setOnboarding(false);
+    try {
+      const userRef = doc(db, "users", generatedId);
+      await setDoc(userRef, {
+        id: generatedId,
+        name: tempName.trim(),
+        color: selectedColor,
+        isOnline: true,
+        lastActive: Date.now()
       });
+
+      // Store in LocalStorage and trigger state
+      localStorage.setItem("pulse_poke_user", JSON.stringify(newProfile));
+      setUser(newProfile);
+      setOnboarding(false);
+      playSendAudio();
+    } catch (err) {
+      console.error("Onboarding register failed", err);
+      // Fallback
+      localStorage.setItem("pulse_poke_user", JSON.stringify(newProfile));
+      setUser(newProfile);
+      setOnboarding(false);
+    }
   };
 
   // 6. Action: Send a poke wave
@@ -369,23 +484,27 @@ export default function App() {
     }, 2400);
 
     try {
-      const response = await fetch("/api/poke", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          fromUserId: user.id,
-          toUserId: targetUserId,
-        }),
-      });
-      const data = await response.json();
-      if (data.success) {
-        // Update connection details locally immediately
-        setConnections((prev) =>
-          prev.map((c) => (c.id === connId ? { ...c, ...data.connection } : c))
-        );
+      const connRef = doc(db, "connections", connId);
+      const connSnap = await getDoc(connRef);
+      if (connSnap.exists()) {
+        const currentData = connSnap.data();
+        const currentCount = currentData.pokesCount || 0;
+
+        await setDoc(connRef, {
+          id: connId,
+          user1Id: currentData.user1Id,
+          user2Id: currentData.user2Id,
+          user1Name: currentData.user1Id === user.id ? user.name : currentData.user1Name,
+          user2Name: currentData.user2Id === user.id ? user.name : currentData.user2Name,
+          user1Color: currentData.user1Id === user.id ? user.color : currentData.user1Color,
+          user2Color: currentData.user2Id === user.id ? user.color : currentData.user2Color,
+          pokesCount: currentCount + 1,
+          lastPokeTime: Date.now(),
+          lastPokeFrom: user.id
+        });
       }
     } catch (err) {
-      console.error("Failed to send poke", err);
+      console.error("Failed to send poke wave via Firestore", err);
     }
   };
 
@@ -401,39 +520,50 @@ export default function App() {
     }
 
     try {
-      const res = await fetch("/api/connections/join", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          myUserId: user.id,
-          otherUserId: cleanId,
-          otherUserName: "Friend",
-          otherUserColor: "#00f2fe",
-        }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setConnections((prev) => {
-          const exists = prev.some((c) => c.id === data.connection.id);
-          if (exists) return prev;
-          return [...prev, data.connection];
+      const connId = [user.id, cleanId].sort().join("_");
+      const connRef = doc(db, "connections", connId);
+      const connSnap = await getDoc(connRef);
+
+      if (!connSnap.exists()) {
+        await setDoc(connRef, {
+          id: connId,
+          user1Id: user.id,
+          user2Id: cleanId,
+          user1Name: user.name,
+          user2Name: "Friend",
+          user1Color: user.color,
+          user2Color: "#00f2fe",
+          pokesCount: 0,
+          lastPokeTime: Date.now(),
+          lastPokeFrom: ""
         });
-        setManualInviteId("");
-        setShareOpen(false);
-        playSendAudio();
-        // Immediately poke them to start the connection!
-        const partnerId =
-          data.connection.user1Id === user.id
-            ? data.connection.user2Id
-            : data.connection.user1Id;
-        sendPoke(partnerId, data.connection.id);
-      } else {
-        alert(data.error || "Could not link connection.");
+
+        // Also register default placeholder other user if needed
+        const otherRef = doc(db, "users", cleanId);
+        const otherSnap = await getDoc(otherRef);
+        if (!otherSnap.exists()) {
+          await setDoc(otherRef, {
+            id: cleanId,
+            name: "Friend",
+            color: "#00f2fe",
+            isOnline: false,
+            lastActive: Date.now() - 3600 * 1000
+          });
+        }
       }
+
+      setManualInviteId("");
+      setShareOpen(false);
+      playSendAudio();
+
+      // Immediately poke them to start connection
+      sendPoke(cleanId, connId);
     } catch (err) {
-      console.error("Manual join failed", err);
+      console.error("Manual connect failed", err);
+      alert("Could not establish link. Please try again.");
     }
   };
+
 
   // Render Loading placeholder
   if (loading) {
@@ -472,12 +602,12 @@ export default function App() {
           {/* Connection status indicator */}
           <div
             className={`flex items-center gap-1.5 px-3 py-1 rounded-full border text-[10px] font-mono tracking-wider transition-all ${
-              sseConnected
+              syncConnected
                 ? "bg-emerald-950/20 border-emerald-500/30 text-emerald-400"
                 : "bg-amber-950/20 border-amber-500/30 text-amber-400"
             }`}
           >
-            {sseConnected ? (
+            {syncConnected ? (
               <>
                 <Wifi className="w-3 h-3 text-emerald-400" />
                 <span className="hidden xs:inline">ONLINE GRID</span>
@@ -656,7 +786,7 @@ export default function App() {
             </div>
 
             {/* Main Interactive Circle Grid */}
-            {connections.length === 0 ? (
+            {enrichedConnections.length === 0 ? (
               /* EMPTY STATE: Only a plus icon to poke first user */
               <motion.div
                 initial={{ opacity: 0, scale: 0.95 }}
@@ -701,7 +831,7 @@ export default function App() {
                 </div>
 
                 <div className="flex flex-wrap items-center justify-center gap-12 max-w-5xl mx-auto">
-                  {connections.map((conn) => {
+                  {enrichedConnections.map((conn) => {
                     const partnerId = conn.user1Id === user?.id ? conn.user2Id : conn.user1Id;
                     const partnerName = conn.user1Id === user?.id ? conn.user2Name : conn.user1Name;
                     const partnerColor = conn.user1Id === user?.id ? conn.user2Color : conn.user1Color;
@@ -804,7 +934,7 @@ export default function App() {
       <footer className="relative z-10 w-full max-w-7xl mx-auto px-6 py-8 border-t border-white/5 flex justify-between items-end opacity-40 text-[10px] uppercase tracking-[0.2em] font-sans">
         <div className="flex gap-8">
           <div>STATUS: ENCRYPTED</div>
-          <div>LATENCY: {sseConnected ? "12MS" : "N/A"}</div>
+          <div>LATENCY: {syncConnected ? "12MS" : "N/A"}</div>
         </div>
         <div>EST. 2026 / DISTANT PHYSICALITY</div>
       </footer>
@@ -829,7 +959,7 @@ export default function App() {
               <div className="flex gap-2.5">
                 <button
                   onClick={() => {
-                    const matchedConn = connections.find(
+                    const matchedConn = enrichedConnections.find(
                       (c) =>
                         (c.user1Id === user?.id && c.user2Id === activePoke.fromUserId) ||
                         (c.user2Id === user?.id && c.user1Id === activePoke.fromUserId)

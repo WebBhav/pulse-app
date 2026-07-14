@@ -1,0 +1,62 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Default-deny catch-all rule
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ID Validation Helper
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    // Schema Validation Helpers
+    function isValidUser(data) {
+      return data.keys().hasAll(['id', 'name', 'color', 'isOnline', 'lastActive'])
+        && data.keys().size() == 5
+        && data.id is string
+        && data.name is string
+        && data.name.size() <= 64
+        && data.color is string
+        && data.color.size() <= 16
+        && data.isOnline is bool
+        && data.lastActive is number;
+    }
+
+    function isValidConnection(data) {
+      return data.keys().hasAll([
+          'id', 'user1Id', 'user2Id', 'user1Name', 'user2Name', 
+          'user1Color', 'user2Color', 'pokesCount', 'lastPokeTime', 'lastPokeFrom'
+        ])
+        && data.keys().size() == 10
+        && data.id is string
+        && data.user1Id is string
+        && data.user2Id is string
+        && data.user1Name is string
+        && data.user2Name is string
+        && data.user1Color is string
+        && data.user2Color is string
+        && data.pokesCount is number
+        && data.lastPokeTime is number
+        && data.lastPokeFrom is string;
+    }
+
+    // Rules for Users
+    match /users/{userId} {
+      allow get: if isValidId(userId);
+      allow create, update: if isValidId(userId) && isValidUser(incoming());
+    }
+
+    // Rules for Connections
+    match /connections/{connectionId} {
+      allow get, list: if isValidId(connectionId);
+      allow create, update: if isValidId(connectionId) && isValidConnection(incoming());
+    }
+  }
+}
