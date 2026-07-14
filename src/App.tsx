@@ -17,17 +17,7 @@ import {
   ExternalLink,
   Compass,
 } from "lucide-react";
-import { db, handleFirestoreError, OperationType } from "./lib/firebase";
-import {
-  doc,
-  setDoc,
-  getDoc,
-  query,
-  where,
-  or,
-  onSnapshot,
-  collection,
-} from "firebase/firestore";
+import { supabase, isSupabaseConfigured } from "./lib/supabase";
 
 
 interface User {
@@ -110,6 +100,7 @@ export default function App() {
   // Temporary local profile creation state
   const [tempName, setTempName] = useState("");
   const [selectedColor, setSelectedColor] = useState(GLOW_COLORS[0].hex);
+  const [supabaseUser, setSupabaseUser] = useState<any>(null);
 
   // Keep track of ongoing animations/ripples on pokes
   const [ripplingConnectionId, setRipplingConnectionId] = useState<string | null>(null);
@@ -241,216 +232,169 @@ export default function App() {
     setLoading(false);
   }, []);
 
-  // 4. Real-time Synchronization & Presence
+  // 4. Supabase Session Listener
+  useEffect(() => {
+    if (!supabase) return;
+
+    // Get initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        setSupabaseUser(session.user);
+        const fullName = session.user.user_metadata?.full_name || session.user.email?.split("@")[0] || "";
+        setTempName((prev) => prev || fullName);
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.user) {
+        setSupabaseUser(session.user);
+        const fullName = session.user.user_metadata?.full_name || session.user.email?.split("@")[0] || "";
+        setTempName((prev) => prev || fullName);
+      } else {
+        setSupabaseUser(null);
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  // 5. Real-time Synchronization & Presence via Server-Sent Events (SSE)
   useEffect(() => {
     if (!user) return;
 
-    // A. Subscriptions to Connections
-    const q = query(
-      collection(db, "connections"),
-      or(
-        where("user1Id", "==", user.id),
-        where("user2Id", "==", user.id)
-      )
-    );
+    // Build the SSE stream query URL
+    const url = `/api/stream?userId=${user.id}&name=${encodeURIComponent(user.name)}&color=${encodeURIComponent(user.color)}`;
+    const eventSource = new EventSource(url);
 
-    const unsubConnections = onSnapshot(
-      q,
-      (snapshot) => {
-        setSyncConnected(true);
-        setErrorMsg(null);
+    eventSource.onopen = () => {
+      setSyncConnected(true);
+      setErrorMsg(null);
+    };
 
-        const connList: Connection[] = [];
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data();
-          connList.push({
-            id: data.id,
-            user1Id: data.user1Id,
-            user2Id: data.user2Id,
-            user1Name: data.user1Name,
-            user2Name: data.user2Name,
-            user1Color: data.user1Color,
-            user2Color: data.user2Color,
-            pokesCount: data.pokesCount,
-            lastPokeTime: data.lastPokeTime,
-            lastPokeFrom: data.lastPokeFrom,
-          });
-        });
+    eventSource.onerror = (err) => {
+      console.error("SSE connection error", err);
+      setSyncConnected(false);
+      setErrorMsg("Failed to synchronize connections...");
+    };
 
-        // Detect new incoming pokes
-        snapshot.docChanges().forEach((change) => {
-          if (change.type === "modified") {
-            const conn = change.doc.data();
-            if (conn.lastPokeFrom && conn.lastPokeFrom !== user.id) {
-              const prevConn = connectionsRef.current.find((c) => c.id === conn.id);
-              const prevCount = prevConn ? prevConn.pokesCount : 0;
-              if (conn.pokesCount > prevCount) {
-                const partnerName = conn.user1Id === user.id ? conn.user2Name : conn.user1Name;
-                const partnerColor = conn.user1Id === user.id ? conn.user2Color : conn.user1Color;
+    eventSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === "init") {
+          setConnections(data.connections || []);
+        } else if (data.type === "poke") {
+          const conn = data.connection;
+          if (conn.lastPokeFrom && conn.lastPokeFrom !== user.id) {
+            const prevConn = connectionsRef.current.find((c) => c.id === conn.id);
+            const prevCount = prevConn ? prevConn.pokesCount : 0;
+            if (conn.pokesCount > prevCount) {
+              const partnerName = conn.user1Id === user.id ? conn.user2Name : conn.user1Name;
+              const partnerColor = conn.user1Id === user.id ? conn.user2Color : conn.user1Color;
 
-                playPokeAudio(380);
-                triggerVibrate([150, 100, 150, 100, 200]);
+              playPokeAudio(380);
+              triggerVibrate([150, 100, 150, 100, 200]);
 
-                setActivePoke({
-                  id: Date.now().toString(),
-                  fromUserId: conn.lastPokeFrom,
-                  fromUserName: partnerName,
-                  fromUserColor: partnerColor,
-                  timestamp: Date.now(),
-                });
+              setActivePoke({
+                id: Date.now().toString(),
+                fromUserId: conn.lastPokeFrom,
+                fromUserName: partnerName,
+                fromUserColor: partnerColor,
+                timestamp: Date.now(),
+              });
 
-                setRipplingConnectionId(conn.id);
-                setTimeout(() => setRipplingConnectionId(null), 2500);
-              }
+              setRipplingConnectionId(conn.id);
+              setTimeout(() => setRipplingConnectionId(null), 2500);
             }
           }
-        });
 
-        setConnections(connList);
-      },
-      (error) => {
-        console.error("Firestore snapshot error", error);
-        setSyncConnected(false);
-        setErrorMsg("Failed to synchronize connections...");
-      }
-    );
-
-    // B. Presence Tracker
-    const userRef = doc(db, "users", user.id);
-    const setPresence = async (online: boolean) => {
-      try {
-        await setDoc(userRef, {
-          id: user.id,
-          name: user.name,
-          color: user.color,
-          isOnline: online,
-          lastActive: Date.now()
-        });
+          // Update connections list
+          setConnections((prev) => {
+            const index = prev.findIndex((c) => c.id === conn.id);
+            if (index !== -1) {
+              const updated = [...prev];
+              updated[index] = {
+                ...conn,
+                partnerOnline: prev[index].partnerOnline, // preserve existing online presence
+              };
+              return updated;
+            } else {
+              return [...prev, conn];
+            }
+          });
+        } else if (data.type === "presence") {
+          const { userId: partnerId, isOnline, lastActive } = data;
+          setPartnersPresence((prev) => ({
+            ...prev,
+            [partnerId]: { isOnline, lastActive },
+          }));
+        } else if (data.type === "connection_created") {
+          const conn = data.connection;
+          setConnections((prev) => {
+            const exists = prev.some((c) => c.id === conn.id);
+            if (exists) return prev;
+            return [...prev, conn];
+          });
+        }
       } catch (err) {
-        console.error("Presence status set failed", err);
+        console.error("Failed to parse SSE event message:", err);
       }
     };
 
-    setPresence(true);
-
-    const heartbeat = setInterval(() => {
-      setPresence(true);
-    }, 25000);
-
-    const handleFocus = () => setPresence(true);
-    const handleBlur = () => setPresence(false);
-    const handleBeforeUnload = () => setPresence(false);
-
-    window.addEventListener("focus", handleFocus);
-    window.addEventListener("blur", handleBlur);
-    window.addEventListener("beforeunload", handleBeforeUnload);
-
-    // C. Auto Invite Accept handler
+    // Auto invite join handler
     if (inviteInfo && inviteInfo.id !== user.id) {
-      const connId = [user.id, inviteInfo.id].sort().join("_");
-      const connRef = doc(db, "connections", connId);
-      
       const setupInviteConnection = async () => {
         try {
-          const connSnap = await getDoc(connRef);
-          if (!connSnap.exists()) {
-            await setDoc(connRef, {
-              id: connId,
-              user1Id: user.id,
-              user2Id: inviteInfo.id,
-              user1Name: user.name,
-              user2Name: inviteInfo.name,
-              user1Color: user.color,
-              user2Color: inviteInfo.color,
-              pokesCount: 0,
-              lastPokeTime: Date.now(),
-              lastPokeFrom: ""
-            });
+          const res = await fetch("/api/connections/join", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              myUserId: user.id,
+              otherUserId: inviteInfo.id,
+              otherUserName: inviteInfo.name,
+              otherUserColor: inviteInfo.color,
+            }),
+          });
+          const data = await res.json();
+          if (data.success) {
+            setInviteAccepted(true);
+            playSendAudio();
           }
-
-          // Register other user placeholder if needed
-          const otherRef = doc(db, "users", inviteInfo.id);
-          const otherSnap = await getDoc(otherRef);
-          if (!otherSnap.exists()) {
-            await setDoc(otherRef, {
-              id: inviteInfo.id,
-              name: inviteInfo.name,
-              color: inviteInfo.color,
-              isOnline: false,
-              lastActive: Date.now() - 3600 * 1000
-            });
-          }
-
-          setInviteAccepted(true);
-          playSendAudio();
         } catch (err) {
           console.error("Auto invite accept failed", err);
         }
       };
-
       setupInviteConnection();
     }
 
     return () => {
-      unsubConnections();
-      clearInterval(heartbeat);
-      window.removeEventListener("focus", handleFocus);
-      window.removeEventListener("blur", handleBlur);
-      window.removeEventListener("beforeunload", handleBeforeUnload);
-      setPresence(false);
+      eventSource.close();
     };
   }, [user, inviteInfo]);
 
-  // D. Subscription to partner user presences
-  useEffect(() => {
-    if (!user || connections.length === 0) return;
-
-    const partnerIds: string[] = Array.from(
-      new Set(
-        connections.map((c) => (c.user1Id === user.id ? c.user2Id : c.user1Id))
-      )
-    );
-
-    const unsubs = partnerIds.map((partnerId: string) => {
-      return onSnapshot(doc(db, "users", partnerId), (snapshot) => {
-        if (snapshot.exists()) {
-          const data = snapshot.data();
-          setPartnersPresence((prev) => ({
-            ...prev,
-            [partnerId]: {
-              isOnline: data.isOnline ?? false,
-              lastActive: data.lastActive ?? 0,
-            },
-          }));
-        }
-      });
-    });
-
-    return () => {
-      unsubs.forEach((unsub) => unsub());
-    };
-  }, [user, connections]);
-
-  // 5. Complete Profile Setup Onboarding
+  // 6. Complete Profile Setup Onboarding
   const handleOnboardingSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!tempName.trim()) return;
 
-    const generatedId = "user_" + Math.random().toString(36).substring(2, 11);
+    // Use Google user ID if logged in, otherwise random guest ID
+    const userId = supabaseUser?.id || "user_" + Math.random().toString(36).substring(2, 11);
     const newProfile: User = {
-      id: generatedId,
+      id: userId,
       name: tempName.trim(),
       color: selectedColor,
     };
 
     try {
-      const userRef = doc(db, "users", generatedId);
-      await setDoc(userRef, {
-        id: generatedId,
-        name: tempName.trim(),
-        color: selectedColor,
-        isOnline: true,
-        lastActive: Date.now()
+      await fetch("/api/users/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: userId,
+          name: tempName.trim(),
+          color: selectedColor,
+        }),
       });
 
       // Store in LocalStorage and trigger state
@@ -467,7 +411,7 @@ export default function App() {
     }
   };
 
-  // 6. Action: Send a poke wave
+  // 7. Action: Send a poke wave
   const sendPoke = async (targetUserId: string, connId: string) => {
     if (!user) return;
 
@@ -484,31 +428,20 @@ export default function App() {
     }, 2400);
 
     try {
-      const connRef = doc(db, "connections", connId);
-      const connSnap = await getDoc(connRef);
-      if (connSnap.exists()) {
-        const currentData = connSnap.data();
-        const currentCount = currentData.pokesCount || 0;
-
-        await setDoc(connRef, {
-          id: connId,
-          user1Id: currentData.user1Id,
-          user2Id: currentData.user2Id,
-          user1Name: currentData.user1Id === user.id ? user.name : currentData.user1Name,
-          user2Name: currentData.user2Id === user.id ? user.name : currentData.user2Name,
-          user1Color: currentData.user1Id === user.id ? user.color : currentData.user1Color,
-          user2Color: currentData.user2Id === user.id ? user.color : currentData.user2Color,
-          pokesCount: currentCount + 1,
-          lastPokeTime: Date.now(),
-          lastPokeFrom: user.id
-        });
-      }
+      await fetch("/api/poke", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fromUserId: user.id,
+          toUserId: targetUserId,
+        }),
+      });
     } catch (err) {
-      console.error("Failed to send poke wave via Firestore", err);
+      console.error("Failed to send poke wave via API", err);
     }
   };
 
-  // 7. Manual connect via typed User ID
+  // 8. Manual connect via typed User ID
   const connectManually = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user || !manualInviteId.trim()) return;
@@ -521,48 +454,64 @@ export default function App() {
 
     try {
       const connId = [user.id, cleanId].sort().join("_");
-      const connRef = doc(db, "connections", connId);
-      const connSnap = await getDoc(connRef);
-
-      if (!connSnap.exists()) {
-        await setDoc(connRef, {
-          id: connId,
-          user1Id: user.id,
-          user2Id: cleanId,
-          user1Name: user.name,
-          user2Name: "Friend",
-          user1Color: user.color,
-          user2Color: "#00f2fe",
-          pokesCount: 0,
-          lastPokeTime: Date.now(),
-          lastPokeFrom: ""
-        });
-
-        // Also register default placeholder other user if needed
-        const otherRef = doc(db, "users", cleanId);
-        const otherSnap = await getDoc(otherRef);
-        if (!otherSnap.exists()) {
-          await setDoc(otherRef, {
-            id: cleanId,
-            name: "Friend",
-            color: "#00f2fe",
-            isOnline: false,
-            lastActive: Date.now() - 3600 * 1000
-          });
-        }
-      }
+      const res = await fetch("/api/connections/join", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          myUserId: user.id,
+          otherUserId: cleanId,
+          otherUserName: "Friend",
+          otherUserColor: "#00f2fe",
+        }),
+      });
+      const data = await res.json();
 
       setManualInviteId("");
       setShareOpen(false);
       playSendAudio();
 
       // Immediately poke them to start connection
-      sendPoke(cleanId, connId);
+      if (data.success) {
+        sendPoke(cleanId, connId);
+      }
     } catch (err) {
       console.error("Manual connect failed", err);
       alert("Could not establish link. Please try again.");
     }
   };
+
+  // Google Sign-In Action via Supabase
+  const handleGoogleSignIn = async () => {
+    if (!supabase) {
+      alert("Supabase keys are not configured yet. Set up VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY first.");
+      return;
+    }
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+          redirectTo: window.location.origin,
+        },
+      });
+      if (error) throw error;
+    } catch (err: any) {
+      console.error("Google sign-in error", err);
+      alert(`Google Sign-In failed: ${err.message || err}`);
+    }
+  };
+
+  // Google Sign-Out Action
+  const handleSignOut = async () => {
+    if (supabase) {
+      await supabase.auth.signOut();
+    }
+    localStorage.removeItem("pulse_poke_user");
+    setUser(null);
+    setSupabaseUser(null);
+    setTempName("");
+    setOnboarding(true);
+  };
+
 
 
   // Render Loading placeholder
@@ -673,6 +622,59 @@ export default function App() {
               </p>
             </div>
 
+            {isSupabaseConfigured ? (
+              !supabaseUser ? (
+                <div className="space-y-4 mb-6">
+                  <button
+                    type="button"
+                    onClick={handleGoogleSignIn}
+                    className="w-full flex items-center justify-center gap-3 py-3.5 px-4 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-white font-semibold transition-all cursor-pointer text-sm"
+                  >
+                    <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                      <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                      <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" fill="#FBBC05"/>
+                      <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" fill="#EA4335"/>
+                    </svg>
+                    <span>CONTINUE WITH GOOGLE</span>
+                  </button>
+                  <div className="flex items-center bg-transparent">
+                    <div className="flex-1 h-px bg-white/5" />
+                    <span className="px-3 text-[10px] font-mono text-zinc-500 tracking-widest uppercase bg-transparent">Or Guest Mode</span>
+                    <div className="flex-1 h-px bg-white/5" />
+                  </div>
+                </div>
+              ) : (
+                <div className="mb-6 p-4 rounded-2xl border border-emerald-500/20 bg-emerald-500/5 text-emerald-400 text-xs flex items-center justify-between">
+                  <div>
+                    <div className="font-semibold text-[11px] tracking-wider uppercase font-mono mb-0.5">
+                      Authenticated via Google
+                    </div>
+                    <div className="text-zinc-400 font-mono text-[10px]">
+                      {supabaseUser.email}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleSignOut}
+                    className="text-[10px] text-zinc-500 hover:text-red-400 font-mono tracking-wider uppercase transition-colors cursor-pointer"
+                  >
+                    Disconnect
+                  </button>
+                </div>
+              )
+            ) : (
+              <div className="mb-6 p-4 rounded-2xl border border-amber-500/20 bg-amber-500/5 text-amber-400 text-xs">
+                <div className="font-semibold flex items-center gap-1.5 mb-1 text-[11px] tracking-wider uppercase font-mono">
+                  <Zap className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+                  Supabase Integration Ready
+                </div>
+                <p className="text-zinc-400 leading-relaxed text-[11px]">
+                  To enable Google Authentication, declare <code className="text-amber-200 font-mono">VITE_SUPABASE_URL</code> and <code className="text-amber-200 font-mono">VITE_SUPABASE_ANON_KEY</code> in your environment variables.
+                </p>
+              </div>
+            )}
+
             <form onSubmit={handleOnboardingSubmit} className="space-y-6">
               <div>
                 <label className="block text-[10px] font-mono tracking-[0.2em] text-zinc-500 uppercase mb-2">
@@ -774,9 +776,7 @@ export default function App() {
               <button
                 onClick={() => {
                   if (confirm("Reset account and create a new signature?")) {
-                    localStorage.removeItem("pulse_poke_user");
-                    setUser(null);
-                    setOnboarding(true);
+                    handleSignOut();
                   }
                 }}
                 className="text-[10px] text-zinc-500 hover:text-[#ff00f5] font-mono tracking-wider uppercase transition-colors cursor-pointer"
